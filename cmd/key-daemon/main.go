@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -13,6 +12,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	config "github.com/roboogg133/gpass/config"
+	config_lua "github.com/roboogg133/gpass/config/lua"
 	"github.com/roboogg133/gpass/internal"
 	"github.com/roboogg133/gpass/internal/crypt"
 	"github.com/roboogg133/gpass/internal/logs"
@@ -27,6 +27,9 @@ var MasterKey []byte
 var locked bool
 
 var mu sync.Mutex
+var databaseMu sync.Mutex
+
+var initLua string
 
 func init() {
 	var err error
@@ -39,6 +42,22 @@ func init() {
 	if err != nil {
 		log.Panic(err)
 	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		errorLog.Panic(err)
+	}
+
+	initLua = filepath.Join(homeDir, config.RootDirName, config.ConfigurationDirName, config.LuaFName)
+}
+
+func zero(data []byte) {
+	if data == nil {
+		return
+	}
+	for i := range data {
+		data[i] = 0
+	}
 }
 
 func ControlMasterKey() {
@@ -49,7 +68,10 @@ func ControlMasterKey() {
 	time.Sleep(config.TimeSleep * time.Minute)
 	mu.Lock()
 	defer mu.Unlock()
+	zero(MasterKey)
+	unix.Munlock(MasterKey)
 	MasterKey = nil
+
 	locked = false
 }
 
@@ -95,7 +117,7 @@ func main() {
 		}
 
 		go handleConnection(conn)
-
+		_ = config_lua.UsualRunFunction("connection_received", initLua)
 	}
 
 }
@@ -122,6 +144,7 @@ func handleConnection(c *net.UnixConn) {
 	}
 
 	if ucred.Uid != uint32(os.Getuid()) {
+		config_lua.RunFunctionIntParam("other_user_trying_to_acess", int(ucred.Uid), initLua)
 		statLog.Println("mismatched process owner uid and caller uid")
 		return
 	}
@@ -146,6 +169,7 @@ func handleConnection(c *net.UnixConn) {
 		case "unlock":
 			success := false
 			MasterKey = argon2.IDKey([]byte(request.Authentication), []byte(config.Pepper), 3, 64*1024, 4, 32)
+			unix.Mlock(MasterKey)
 			go ControlMasterKey()
 			defer func() {
 				if !success {
@@ -167,6 +191,8 @@ func handleConnection(c *net.UnixConn) {
 				errorLog.Println("in a connection got an error : ", err)
 				return
 			}
+
+			_ = config_lua.UsualRunFunction("unlocked_key", initLua)
 			success = true
 			return
 		case "change":
@@ -186,6 +212,9 @@ func handleConnection(c *net.UnixConn) {
 				errorLog.Println("in a connection got an error : ", err)
 				return
 			}
+
+			databaseMu.Lock()
+			defer databaseMu.Unlock()
 			db, err := sql.Open("sqlite3", p)
 			if err != nil {
 				errorLog.Println("in a connection got an error : ", err)
@@ -212,17 +241,18 @@ func handleConnection(c *net.UnixConn) {
 
 				AllFiles = append(AllFiles, row)
 			}
+
+			secretsDir, err := config.SecretsDirPath()
+			if err != nil {
+				errorLog.Println("in a connection got an error : ", err)
+				return
+			}
+
 			mu.Lock()
 			defer mu.Unlock()
 
 			for i, v := range AllFiles {
-				f, err := os.Open(v.Path)
-				if err != nil {
-					errorLog.Println("in a connection got an error : ", err)
-					return
-				}
-
-				buf, err := io.ReadAll(f)
+				buf, err := os.ReadFile(filepath.Join(secretsDir, v.Path))
 				if err != nil {
 					errorLog.Println("in a connection got an error : ", err)
 					return
@@ -266,7 +296,9 @@ func handleConnection(c *net.UnixConn) {
 				errorLog.Println("in a connection got an error : ", err)
 				return
 			}
-			statLog.Println("changed password")
+			statLog.Println("changed key")
+
+			_ = config_lua.UsualRunFunction("changed_key", initLua)
 			success = true
 			return
 		}
@@ -284,6 +316,7 @@ func handleConnection(c *net.UnixConn) {
 
 			if MasterKey == nil {
 				statLog.Println("tried to add a secret")
+				_ = config_lua.UsualRunFunction("action_with_lock", initLua)
 				return
 			}
 
@@ -293,11 +326,21 @@ func handleConnection(c *net.UnixConn) {
 				return
 			}
 
-			db, err := sql.Open("sqlite3", p)
+			noncesDb, err := config.NoncesDatabasePath()
 			if err != nil {
 				errorLog.Println("in a connection got an error : ", err)
 				return
 			}
+
+			databaseMu.Lock()
+			defer databaseMu.Unlock()
+			db, err := sql.Open("sqlite3", noncesDb)
+			if err != nil {
+				errorLog.Println("in a connection got an error : ", err)
+				return
+			}
+
+			defer db.Close()
 
 			secret := &internal.Secret{
 				Value: request.Secret,
@@ -316,7 +359,7 @@ func handleConnection(c *net.UnixConn) {
 				return
 			}
 
-			_, err = db.Exec("INSERT INTO nonces (path, nonce) VALUES (?, ?)", filepath.Join(p, request.Path), nonce)
+			_, err = db.Exec("INSERT INTO nonces (path, nonce) VALUES (?, ?)", request.Path, nonce)
 			if err != nil {
 				errorLog.Println("in a connection got an error : ", err)
 				return
@@ -332,6 +375,76 @@ func handleConnection(c *net.UnixConn) {
 				return
 			}
 			statLog.Println("added a secret")
+			_ = config_lua.UsualRunFunction("added_secret", initLua)
+			success = true
+			return
+
+		case "spell-secret":
+			success := false
+			defer func() {
+				if !success {
+					c.Write([]byte("FAILED"))
+				}
+			}()
+
+			secretsDir, err := config.SecretsDirPath()
+			if err != nil {
+				errorLog.Println("in a connection got an error : ", err)
+				return
+			}
+
+			if MasterKey == nil {
+				statLog.Println("tried to spell a secret without unlocking")
+				_ = config_lua.UsualRunFunction("action_with_lock", initLua)
+				return
+			}
+
+			noncesDb, err := config.NoncesDatabasePath()
+			if err != nil {
+				errorLog.Println("in a connection got an error : ", err)
+				return
+			}
+
+			databaseMu.Lock()
+			defer databaseMu.Unlock()
+			db, err := sql.Open("sqlite3", noncesDb)
+			if err != nil {
+				errorLog.Println("in a connection got an error : ", err)
+				return
+			}
+
+			var nonce []byte
+
+			if err := db.QueryRow("SELECT nonce WHERE path = ?", request.Path).Scan(&nonce); err != nil {
+				errorLog.Println("in a connection got an error : ", err)
+				return
+			}
+
+			buf, err := os.ReadFile(filepath.Join(secretsDir, request.Path))
+			if err != nil {
+				errorLog.Println("in a connection got an error : ", err)
+				return
+			}
+
+			plaintext, err := crypt.Decrypt(MasterKey, buf, nonce)
+			if err != nil {
+				errorLog.Println("in a connection got an error : ", err)
+				return
+			}
+
+			var secret internal.Secret
+
+			if err := json.Unmarshal(plaintext, &secret); err != nil {
+				errorLog.Println("in a connection got an error : ", err)
+				return
+			}
+
+			if _, err := c.Write([]byte(secret.Value)); err != nil {
+				errorLog.Println("in a connection got an error : ", err)
+				return
+			}
+			statLog.Println("spelled a secret")
+			_ = config_lua.UsualRunFunction("secret_spelled", initLua)
 			success = true
 			return
 		}

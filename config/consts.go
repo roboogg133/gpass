@@ -9,4 +9,7 @@ const (
 	RootDirName            = ".gpass"
 	TestFileName           = ".test.lock"
 	NoncesDatabaseName     = "nonces.database"
+	ConfigurationDirName   = "config"
+
+	LuaFName = "init.lua"
 )
