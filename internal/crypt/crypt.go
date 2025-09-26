@@ -3,7 +3,6 @@ package crypt
 import (
 	"crypto/rand"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -47,22 +46,13 @@ func GetTestFileAndNonce() ([]byte, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(homeDir, config.TestFileName), os.O_CREATE|os.O_RDWR, 0660)
+
+	content, err := os.ReadFile(filepath.Join(homeDir, config.RootDirName, config.TestFileName))
 	if err != nil {
 		return nil, nil, err
 	}
 
-	content, err := io.ReadAll(f)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	fnonce, err := os.OpenFile(filepath.Join(homeDir, config.RootDirName, fmt.Sprintf("%s.nonce", config.TestFileName)), os.O_CREATE|os.O_RDWR, 0660)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	nonce, err := io.ReadAll(fnonce)
+	nonce, err := os.ReadFile(filepath.Join(homeDir, config.RootDirName, fmt.Sprintf("%s.nonce", config.TestFileName)))
 	if err != nil {
 		return nil, nil, err
 	}

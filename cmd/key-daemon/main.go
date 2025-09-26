@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -31,14 +32,17 @@ var databaseMu sync.Mutex
 
 var initLua string
 
+var f1 *os.File
+var f2 *os.File
+
 func init() {
 	var err error
-	statLog, err = logs.ErrorsAndStatuses("status")
+	statLog, f1, err = logs.ErrorsAndStatuses("status")
 	if err != nil {
 		log.Panic(err)
 	}
 
-	errorLog, err = logs.ErrorsAndStatuses("error")
+	errorLog, f2, err = logs.ErrorsAndStatuses("error")
 	if err != nil {
 		log.Panic(err)
 	}
@@ -84,6 +88,9 @@ func IfExistsDelete() error {
 }
 
 func main() {
+
+	defer f1.Close()
+	defer f2.Close()
 
 	if err := IfExistsDelete(); err != nil {
 		errorLog.Panic(err)
@@ -149,13 +156,15 @@ func handleConnection(c *net.UnixConn) {
 		return
 	}
 
-	var rawRequest []byte
+	rawRequest := make([]byte, 2048)
 
-	_, err = c.Read(rawRequest)
+	n, err := c.Read(rawRequest)
 	if err != nil {
 		errorLog.Println("in a connection got an error : ", err)
 		return
 	}
+
+	rawRequest = rawRequest[:n]
 
 	var request internal.Request
 
@@ -173,7 +182,10 @@ func handleConnection(c *net.UnixConn) {
 			go ControlMasterKey()
 			defer func() {
 				if !success {
-					c.Write([]byte("FAILED"))
+					c.Write([]byte{0})
+					zero(MasterKey)
+					unix.Munlock(MasterKey)
+					MasterKey = nil
 				}
 			}()
 			test, testnonce, err := crypt.GetTestFileAndNonce()
@@ -185,9 +197,10 @@ func handleConnection(c *net.UnixConn) {
 				_, err := crypt.Decrypt(MasterKey, test, testnonce)
 				if err != nil {
 					statLog.Println("wrong password inserted")
+					return
 				}
 			}
-			if _, err := c.Write([]byte("OK")); err != nil {
+			if _, err := c.Write([]byte{1}); err != nil {
 				errorLog.Println("in a connection got an error : ", err)
 				return
 			}
@@ -199,7 +212,7 @@ func handleConnection(c *net.UnixConn) {
 			success := false
 			defer func() {
 				if !success {
-					c.Write([]byte("FAILED"))
+					c.Write([]byte{0})
 				}
 			}()
 
@@ -292,7 +305,7 @@ func handleConnection(c *net.UnixConn) {
 					return
 				}
 			}
-			if _, err := c.Write([]byte("OK")); err != nil {
+			if _, err := c.Write([]byte{1}); err != nil {
 				errorLog.Println("in a connection got an error : ", err)
 				return
 			}
@@ -300,6 +313,22 @@ func handleConnection(c *net.UnixConn) {
 
 			_ = config_lua.UsualRunFunction("changed_key", initLua)
 			success = true
+			return
+
+		case "lock":
+			zero(MasterKey)
+			unix.Munlock(MasterKey)
+			MasterKey = nil
+
+			locked = false
+			return
+		case "check":
+			if MasterKey == nil {
+				c.Write([]byte{0})
+			} else {
+				c.Write([]byte{1})
+			}
+			fmt.Println("escrevi")
 			return
 		}
 
@@ -310,19 +339,18 @@ func handleConnection(c *net.UnixConn) {
 			success := false
 			defer func() {
 				if !success {
-					c.Write([]byte("FAILED"))
+					c.Write([]byte{0})
 				}
 			}()
 
 			if MasterKey == nil {
-				statLog.Println("tried to add a secret")
+				statLog.Println("tried to add a secret but data is locked")
 				_ = config_lua.UsualRunFunction("action_with_lock", initLua)
 				return
 			}
 
 			p, err := config.SecretsDirPath()
 			if err != nil {
-				errorLog.Println("in a connection got an error : ", err)
 				return
 			}
 
@@ -364,13 +392,16 @@ func handleConnection(c *net.UnixConn) {
 				errorLog.Println("in a connection got an error : ", err)
 				return
 			}
-
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(p, request.Path)), 0700); err != nil {
+				errorLog.Println("in a connection got an error : ", err)
+				return
+			}
 			if err := os.WriteFile(filepath.Join(p, request.Path), ciphertext, 0700); err != nil {
 				errorLog.Println("in a connection got an error : ", err)
 				return
 			}
 
-			if _, err := c.Write([]byte("OK")); err != nil {
+			if _, err := c.Write([]byte{1}); err != nil {
 				errorLog.Println("in a connection got an error : ", err)
 				return
 			}
@@ -383,7 +414,7 @@ func handleConnection(c *net.UnixConn) {
 			success := false
 			defer func() {
 				if !success {
-					c.Write([]byte("FAILED"))
+					c.Write([]byte{0})
 				}
 			}()
 

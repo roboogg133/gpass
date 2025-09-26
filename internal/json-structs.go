@@ -1,5 +1,7 @@
 package internal
 
+import "errors"
+
 type Request struct {
 	Action         string `json:"action"`
 	Service        string `json:"service"`
@@ -13,3 +15,5 @@ type Secret struct {
 	Value string `json:"value"`
 	OTP   string `json:"otp"`
 }
+
+var ErrInvalidPassword = errors.New("invalid password")

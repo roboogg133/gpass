@@ -12,7 +12,7 @@ func SecretsDirPath() (string, error) {
 		return "", err
 	}
 
-	return filepath.Join(homeDir, SecretsDirName), nil
+	return filepath.Join(homeDir, RootDirName, SecretsDirName), nil
 }
 
 func NoncesDatabasePath() (string, error) {
@@ -22,5 +22,5 @@ func NoncesDatabasePath() (string, error) {
 		return "", err
 	}
 
-	return filepath.Join(homeDir, NoncesDatabaseName), nil
+	return filepath.Join(homeDir, RootDirName, NoncesDatabaseName), nil
 }
