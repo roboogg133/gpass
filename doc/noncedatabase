@@ -1,0 +1,4 @@
+CREATE TABLE nonces(
+    path TEXT NOT NULL UNIQUE PRIMARY KEY,
+    nonce BLOB NOT NULL
+);
